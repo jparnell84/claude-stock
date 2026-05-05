@@ -709,12 +709,24 @@
 
     <div class="settings-field">
       <label class="settings-label" for="proxyUrlInput">Claude Proxy URL</label>
-      <input class="settings-input" id="proxyUrlInput" type="url"
-        placeholder="https://apex-proxy.YOUR-NAME.workers.dev" autocomplete="off" />
-      <div class="settings-note">
+      <div style="display:flex;gap:8px;align-items:center">
+        <input class="settings-input" id="proxyUrlInput" type="text"
+          placeholder="https://apex-proxy.YOUR-NAME.workers.dev" autocomplete="off"
+          style="flex:1;margin:0" />
+        <button id="testProxyBtn" style="
+          flex-shrink:0; height:38px; padding:0 14px;
+          background:transparent; border:1px solid var(--border);
+          border-radius:var(--radius); color:var(--text-dim);
+          font-family:var(--ff); font-size:11px; font-weight:700;
+          letter-spacing:.06em; cursor:pointer; white-space:nowrap;
+          transition:all .2s;
+        ">Test ▶</button>
+      </div>
+      <div id="proxyStatus" style="margin-top:7px;font-size:11px;font-family:var(--fm);display:none"></div>
+      <div class="settings-note" style="margin-top:6px">
         Required on GitHub Pages (CORS). Deploy <code>worker.js</code> as a free
         <a href="https://dash.cloudflare.com/?to=/:account/workers-and-pages/create/workers/new" target="_blank">Cloudflare Worker</a>,
-        then paste its URL here. Leave blank to call Anthropic directly (works on localhost only).
+        then paste its URL here. Must start with <code>https://</code>.
       </div>
     </div>
 
@@ -1387,6 +1399,21 @@ async function callClaude(userMessage, useWebSearch = false) {
     method:  'POST',
     headers,
     body:    JSON.stringify(body),
+  }).catch(err => {
+    // Decode common network-level failures before they become opaque "Failed to fetch"
+    const msg = err.message || '';
+    if (msg.includes('SSL') || msg.includes('ssl') || msg.includes('ERR_SSL')) {
+      throw new Error('SSL error reaching proxy — confirm the URL in Settings starts with https:// and matches your Cloudflare dashboard exactly.');
+    }
+    if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || err.name === 'TypeError') {
+      const proxy = getProxyUrl();
+      throw new Error(
+        proxy
+          ? `Cannot reach proxy at ${proxy} — verify the worker is deployed and the URL is correct.`
+          : 'Network error — add your Cloudflare proxy URL in Settings (required on GitHub Pages).'
+      );
+    }
+    throw err;
   });
 
   if (!res.ok) {
@@ -1430,11 +1457,90 @@ function closeSettings() {
 
 document.getElementById('settingsBtn').onclick    = openSettings;
 document.getElementById('cancelSettings').onclick = closeSettings;
-document.getElementById('saveSettings').onclick   = () => {
+
+// ── URL normaliser ────────────────────────────────────────────────────────
+function normaliseProxyUrl(raw) {
+  let url = raw.trim().replace(/\/+$/, '');          // strip trailing slashes
+  if (!url) return '';
+  if (!/^https?:\/\//i.test(url)) url = 'https://' + url; // prepend scheme
+  try { new URL(url); } catch { return null; }       // null = unparseable
+  return url;
+}
+
+// ── Test proxy connection ─────────────────────────────────────────────────
+document.getElementById('testProxyBtn').onclick = async () => {
+  const btn        = document.getElementById('testProxyBtn');
+  const statusEl   = document.getElementById('proxyStatus');
+  const raw        = document.getElementById('proxyUrlInput').value;
+  const url        = normaliseProxyUrl(raw);
+
+  if (!url) {
+    statusEl.style.display = 'block';
+    statusEl.style.color   = 'var(--red)';
+    statusEl.textContent   = '✕ Invalid URL — must be https://…';
+    return;
+  }
+
+  // Write normalised value back so the user sees exactly what will be saved
+  document.getElementById('proxyUrlInput').value = url;
+
+  btn.textContent        = 'Testing…';
+  btn.disabled           = true;
+  statusEl.style.display = 'block';
+  statusEl.style.color   = 'var(--text-dim)';
+  statusEl.textContent   = 'Sending OPTIONS preflight…';
+
+  try {
+    // A real OPTIONS preflight — if CORS headers are present this will succeed
+    const res = await fetch(url, {
+      method:  'OPTIONS',
+      headers: { 'Access-Control-Request-Method': 'POST' },
+    });
+
+    if (res.ok || res.status === 204) {
+      statusEl.style.color = 'var(--green)';
+      statusEl.textContent = '✓ Proxy reachable — CORS headers present';
+    } else {
+      statusEl.style.color = 'var(--accent)';
+      statusEl.textContent = `⚠ Proxy responded with HTTP ${res.status}`;
+    }
+  } catch (err) {
+    statusEl.style.color = 'var(--red)';
+    if (err.message.includes('SSL') || err.message.includes('ssl')) {
+      statusEl.textContent = '✕ SSL error — check the URL is exactly as shown in Cloudflare dashboard';
+    } else if (err.name === 'TypeError' && err.message.includes('fetch')) {
+      statusEl.textContent = '✕ Network error — URL unreachable or worker not deployed';
+    } else {
+      statusEl.textContent = `✕ ${err.message}`;
+    }
+  } finally {
+    btn.textContent = 'Test ▶';
+    btn.disabled    = false;
+  }
+};
+
+// ── Save ──────────────────────────────────────────────────────────────────
+document.getElementById('saveSettings').onclick = () => {
   const claudeKey  = document.getElementById('apiKeyInput').value.trim();
   const finnhubKey = document.getElementById('finnhubKeyInput').value.trim();
-  const proxyUrl   = document.getElementById('proxyUrlInput').value.trim();
+  const rawProxy   = document.getElementById('proxyUrlInput').value;
   const thr        = parseFloat(document.getElementById('thresholdInput').value) || 15;
+  const statusEl   = document.getElementById('proxyStatus');
+
+  // Validate & normalise proxy URL before saving
+  let proxyUrl = '';
+  if (rawProxy) {
+    const normalised = normaliseProxyUrl(rawProxy);
+    if (!normalised) {
+      statusEl.style.display = 'block';
+      statusEl.style.color   = 'var(--red)';
+      statusEl.textContent   = '✕ Invalid proxy URL — fix before saving';
+      document.getElementById('proxyUrlInput').focus();
+      return;
+    }
+    proxyUrl = normalised;
+    document.getElementById('proxyUrlInput').value = proxyUrl;
+  }
 
   localStorage.setItem(LS_KEY,       claudeKey);
   localStorage.setItem(LS_FH_KEY,    finnhubKey);
