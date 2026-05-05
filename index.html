@@ -816,7 +816,7 @@ function buildTape() {
 // ══════════════════════════════════════════════
 async function fetchQuotes(tickers) {
   const symbols = tickers.join(',');
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbols}&fields=regularMarketPrice,fiftyTwoWeekLow,fiftyTwoWeekHigh,regularMarketChangePercent,longName,symbol,marketCap,trailingPE,regularMarketVolume`;
+  const url = `https://corsproxy.io/?` + encodeURIComponent(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${tickers}&fields=regularMarketPrice,fiftyTwoWeekLow,fiftyTwoWeekHigh,regularMarketChangePercent,longName,symbol,marketCap,trailingPE,regularMarketVolume`);
 
   try {
     const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
