@@ -516,6 +516,15 @@
     }
     .btn-cancel:hover { border-color: var(--text-dim); color: var(--text); }
 
+    .diag-btn {
+      padding: 0 12px; height: 28px; border-radius: var(--radius);
+      background: var(--surface2); border: 1px solid var(--border);
+      color: var(--text-dim); font-family: var(--fm); font-size: 11px;
+      cursor: pointer; transition: all .2s; white-space: nowrap;
+    }
+    .diag-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .diag-btn:disabled { opacity: .4; cursor: not-allowed; }
+
     /* ── TOAST ── */
     .toast-wrap { position: fixed; bottom: 24px; right: 24px; z-index: 999; display: flex; flex-direction: column; gap: 8px; }
     .toast {
@@ -735,6 +744,23 @@
       <input class="settings-input" id="thresholdInput" type="number"
         min="1" max="50" value="15" />
       <div class="settings-note">Show stocks trading within this % of their 52-week low.</div>
+    </div>
+
+    <!-- ── Proxy Diagnostics ── -->
+    <div class="settings-field">
+      <label class="settings-label">Proxy Diagnostics</label>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="diag-btn" id="diagGet">① GET (verify deployed)</button>
+        <button class="diag-btn" id="diagOptions">② OPTIONS (verify CORS)</button>
+        <button class="diag-btn" id="diagPost">③ POST (verify auth)</button>
+      </div>
+      <pre id="diagOutput" style="
+        margin-top:10px; padding:12px; border-radius:var(--radius);
+        background:var(--bg); border:1px solid var(--border);
+        font-family:var(--fm); font-size:11px; color:var(--text-dim);
+        line-height:1.6; white-space:pre-wrap; word-break:break-all;
+        min-height:48px; display:none;
+      "></pre>
     </div>
 
     <div class="settings-footer">
@@ -1554,6 +1580,114 @@ document.getElementById('saveSettings').onclick = () => {
 
 document.getElementById('settingsOverlay').onclick = (e) => {
   if (e.target === e.currentTarget) closeSettings();
+};
+
+// ══════════════════════════════════════════════
+// PROXY DIAGNOSTICS
+// ══════════════════════════════════════════════
+function diagUrl() {
+  const raw = document.getElementById('proxyUrlInput').value;
+  const url = normaliseProxyUrl(raw);
+  if (!url) { diagShow('✕ Enter a valid proxy URL above first', 'var(--red)'); return null; }
+  return url;
+}
+
+function diagShow(text, color = 'var(--text-dim)') {
+  const el = document.getElementById('diagOutput');
+  el.style.display = 'block';
+  el.style.color   = color;
+  el.textContent   = text;
+}
+
+function diagSetBtns(disabled) {
+  ['diagGet','diagOptions','diagPost'].forEach(id => {
+    document.getElementById(id).disabled = disabled;
+  });
+}
+
+// ① GET — should return {"error":"Method not allowed"} if worker is live
+document.getElementById('diagGet').onclick = async () => {
+  const url = diagUrl(); if (!url) return;
+  diagSetBtns(true);
+  diagShow('GET ' + url + '\n…waiting');
+  try {
+    const res = await fetch(url, { method: 'GET' });
+    const body = await res.text();
+    diagShow(
+      `GET → HTTP ${res.status}\n` +
+      `CORS header: ${res.headers.get('Access-Control-Allow-Origin') ?? '(none)'}\n\n` +
+      body.slice(0, 400),
+      res.status === 405 ? 'var(--green)' : 'var(--accent)'
+    );
+  } catch(e) {
+    diagShow(`GET FAILED\n${e.name}: ${e.message}`, 'var(--red)');
+  } finally { diagSetBtns(false); }
+};
+
+// ② OPTIONS preflight — CORS headers must be present
+document.getElementById('diagOptions').onclick = async () => {
+  const url = diagUrl(); if (!url) return;
+  diagSetBtns(true);
+  diagShow('OPTIONS ' + url + '\n…waiting');
+  try {
+    const res = await fetch(url, {
+      method: 'OPTIONS',
+      headers: {
+        'Access-Control-Request-Method':  'POST',
+        'Access-Control-Request-Headers': 'content-type,x-api-key,anthropic-version',
+      },
+    });
+    const acao  = res.headers.get('Access-Control-Allow-Origin');
+    const acam  = res.headers.get('Access-Control-Allow-Methods');
+    const acah  = res.headers.get('Access-Control-Allow-Headers');
+    const ok    = acao && acam;
+    diagShow(
+      `OPTIONS → HTTP ${res.status}\n` +
+      `Allow-Origin:  ${acao ?? '✕ MISSING'}\n` +
+      `Allow-Methods: ${acam ?? '✕ MISSING'}\n` +
+      `Allow-Headers: ${acah ?? '✕ MISSING'}\n\n` +
+      (ok ? '✓ CORS looks correct' : '✕ Worker not returning CORS headers — redeploy with new worker.js'),
+      ok ? 'var(--green)' : 'var(--red)'
+    );
+  } catch(e) {
+    diagShow(
+      `OPTIONS FAILED — worker unreachable or old code still running\n${e.name}: ${e.message}\n\n` +
+      'In Cloudflare: Edit Code → Select All → Paste new worker.js → click DEPLOY (not just Save)',
+      'var(--red)'
+    );
+  } finally { diagSetBtns(false); }
+};
+
+// ③ POST with real key — end-to-end test
+document.getElementById('diagPost').onclick = async () => {
+  const url    = diagUrl(); if (!url) return;
+  const apiKey = getApiKey();
+  if (!apiKey) { diagShow('✕ Add your Anthropic API key in the field above first', 'var(--red)'); return; }
+  diagSetBtns(true);
+  diagShow('POST ' + url + '\nSending minimal Claude request…');
+  try {
+    const res  = await fetch(url, {
+      method:  'POST',
+      headers: {
+        'Content-Type':      'application/json',
+        'x-api-key':         apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model:      'claude-haiku-4-5-20251001',  // cheapest/fastest for a test
+        max_tokens: 16,
+        messages:   [{ role: 'user', content: 'Reply with the word CONNECTED only.' }],
+      }),
+    });
+    const json = await res.json();
+    const text = json?.content?.[0]?.text ?? JSON.stringify(json).slice(0, 200);
+    diagShow(
+      `POST → HTTP ${res.status}\nClaude says: "${text}"`,
+      res.ok ? 'var(--green)' : 'var(--red)'
+    );
+  } catch(e) {
+    diagShow(`POST FAILED\n${e.name}: ${e.message}`, 'var(--red)');
+  } finally { diagSetBtns(false); }
 };
 
 // ══════════════════════════════════════════════
