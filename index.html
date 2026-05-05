@@ -708,6 +708,17 @@
     </div>
 
     <div class="settings-field">
+      <label class="settings-label" for="proxyUrlInput">Claude Proxy URL</label>
+      <input class="settings-input" id="proxyUrlInput" type="url"
+        placeholder="https://apex-proxy.YOUR-NAME.workers.dev" autocomplete="off" />
+      <div class="settings-note">
+        Required on GitHub Pages (CORS). Deploy <code>worker.js</code> as a free
+        <a href="https://dash.cloudflare.com/?to=/:account/workers-and-pages/create/workers/new" target="_blank">Cloudflare Worker</a>,
+        then paste its URL here. Leave blank to call Anthropic directly (works on localhost only).
+      </div>
+    </div>
+
+    <div class="settings-field">
       <label class="settings-label" for="thresholdInput">52-Week Low Threshold (%)</label>
       <input class="settings-input" id="thresholdInput" type="number"
         min="1" max="50" value="15" />
@@ -743,11 +754,12 @@ const DEFAULT_TICKERS = [
   'HPE','X','CLF','NIO','LCID','OPEN','ABNB','DASH','Z'
 ];
 
-const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
-const LS_KEY       = 'apex_anthropic_key';
-const LS_FH_KEY    = 'apex_finnhub_key';
-const LS_THRESHOLD = 'apex_threshold';
-const FH_BASE      = 'https://finnhub.io/api/v1';
+const CLAUDE_MODEL  = 'claude-sonnet-4-20250514';
+const LS_KEY        = 'apex_anthropic_key';
+const LS_FH_KEY     = 'apex_finnhub_key';
+const LS_PROXY_URL  = 'apex_proxy_url';
+const LS_THRESHOLD  = 'apex_threshold';
+const FH_BASE       = 'https://finnhub.io/api/v1';
 
 // ══════════════════════════════════════════════
 // STATE
@@ -758,8 +770,9 @@ let activeFilter = 'all';
 // ══════════════════════════════════════════════
 // UTILS
 // ══════════════════════════════════════════════
-function getApiKey()     { return localStorage.getItem(LS_KEY)    || ''; }
-function getFinnhubKey() { return localStorage.getItem(LS_FH_KEY) || ''; }
+function getApiKey()     { return localStorage.getItem(LS_KEY)       || ''; }
+function getFinnhubKey() { return localStorage.getItem(LS_FH_KEY)    || ''; }
+function getProxyUrl()   { return localStorage.getItem(LS_PROXY_URL) || ''; }
 function getThreshold()  { return parseFloat(localStorage.getItem(LS_THRESHOLD) || '15'); }
 function fmt(n, dec=2) { return n == null ? '—' : Number(n).toFixed(dec); }
 function fmtCurrency(n) {
@@ -786,21 +799,32 @@ function toast(msg, type = 'info') {
 // API STATUS UI
 // ══════════════════════════════════════════════
 function updateApiStatus() {
-  const claude  = getApiKey();
-  const fh      = getFinnhubKey();
-  const dot     = document.getElementById('apiDot');
-  const txt     = document.getElementById('apiStatusText');
-  if (claude && fh) {
-    dot.classList.add('active');
+  const claude   = getApiKey();
+  const fh       = getFinnhubKey();
+  const proxy    = getProxyUrl();
+  const dot      = document.getElementById('apiDot');
+  const txt      = document.getElementById('apiStatusText');
+
+  dot.style.background = '';
+  dot.style.boxShadow  = '';
+  dot.classList.remove('active');
+
+  if (claude && fh && proxy) {
+    dot.classList.add('active');           // green — fully operational
     txt.textContent = 'All Systems Go';
-  } else if (claude || fh) {
+  } else if (claude && fh && !proxy) {
     dot.style.background = 'var(--accent)';
     dot.style.boxShadow  = '0 0 6px var(--accent)';
-    txt.textContent = claude ? 'No Finnhub Key' : 'No Claude Key';
+    txt.textContent = 'No Proxy URL';     // amber — CORS will fail on GH Pages
+  } else if (!claude && fh) {
+    dot.style.background = 'var(--accent)';
+    dot.style.boxShadow  = '0 0 6px var(--accent)';
+    txt.textContent = 'No Claude Key';
+  } else if (claude && !fh) {
+    dot.style.background = 'var(--accent)';
+    dot.style.boxShadow  = '0 0 6px var(--accent)';
+    txt.textContent = 'No Finnhub Key';
   } else {
-    dot.classList.remove('active');
-    dot.style.background = '';
-    dot.style.boxShadow  = '';
     txt.textContent = 'No API Keys';
   }
 }
@@ -1326,38 +1350,59 @@ function renderThesis(ticker, rawText) {
 // CLAUDE API
 // ══════════════════════════════════════════════
 async function callClaude(userMessage, useWebSearch = false) {
-  const apiKey = getApiKey();
-  if (!apiKey) throw new Error('No Anthropic API key configured. Click the ⚙ gear to add one.');
+  const apiKey  = getApiKey();
+  if (!apiKey) throw new Error('No Anthropic API key configured. Click ⚙ to add one.');
+
+  const proxyUrl = getProxyUrl().replace(/\/$/, ''); // strip trailing slash
+
+  // If no proxy is set we try the direct call with the CORS bypass header.
+  // On GitHub Pages this will fail; the error message will guide the user.
+  const endpoint = proxyUrl || 'https://api.anthropic.com/v1/messages';
 
   const body = {
-    model: CLAUDE_MODEL,
+    model:      CLAUDE_MODEL,
     max_tokens: 1500,
-    messages: [{ role: 'user', content: userMessage }]
+    messages:   [{ role: 'user', content: userMessage }],
   };
 
   if (useWebSearch) {
     body.tools = [{ type: 'web_search_20250305', name: 'web_search' }];
   }
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-      'content-type': 'application/json',
-      'anthropic-dangerous-direct-browser-calls': 'true'
-    },
-    body: JSON.stringify(body)
+  // Headers sent to the proxy (or direct). The proxy strips any
+  // anthropic-* headers it doesn't need before forwarding.
+  const headers = {
+    'Content-Type':      'application/json',
+    'x-api-key':         apiKey,
+    'anthropic-version': '2023-06-01',
+  };
+
+  // Only add the direct-browser header when calling Anthropic directly
+  // (has no effect when going through the proxy, but keeps the fallback path clean)
+  if (!proxyUrl) {
+    headers['anthropic-dangerous-direct-browser-calls'] = 'true';
+  }
+
+  const res = await fetch(endpoint, {
+    method:  'POST',
+    headers,
+    body:    JSON.stringify(body),
   });
 
   if (!res.ok) {
     const errData = await res.json().catch(() => ({}));
+    // Surface a helpful message if the user forgot to configure the proxy
+    if (res.status === 0 || res.type === 'opaque' || errData?.error?.type === 'cors') {
+      throw new Error(
+        'CORS blocked. Deploy the Cloudflare Worker proxy (worker.js) and paste the URL into Settings → Claude Proxy URL.'
+      );
+    }
     throw new Error(errData?.error?.message || `API error ${res.status}`);
   }
 
   const data = await res.json();
 
-  // Extract all text blocks
+  // Extract all text blocks (web-search responses mix text + tool_use blocks)
   const text = (data.content || [])
     .filter(b => b.type === 'text')
     .map(b => b.text)
@@ -1374,6 +1419,7 @@ function openSettings() {
   const overlay = document.getElementById('settingsOverlay');
   document.getElementById('apiKeyInput').value     = getApiKey();
   document.getElementById('finnhubKeyInput').value = getFinnhubKey();
+  document.getElementById('proxyUrlInput').value   = getProxyUrl();
   document.getElementById('thresholdInput').value  = getThreshold();
   overlay.classList.add('open');
 }
@@ -1387,10 +1433,12 @@ document.getElementById('cancelSettings').onclick = closeSettings;
 document.getElementById('saveSettings').onclick   = () => {
   const claudeKey  = document.getElementById('apiKeyInput').value.trim();
   const finnhubKey = document.getElementById('finnhubKeyInput').value.trim();
+  const proxyUrl   = document.getElementById('proxyUrlInput').value.trim();
   const thr        = parseFloat(document.getElementById('thresholdInput').value) || 15;
 
   localStorage.setItem(LS_KEY,       claudeKey);
   localStorage.setItem(LS_FH_KEY,    finnhubKey);
+  localStorage.setItem(LS_PROXY_URL, proxyUrl);
   localStorage.setItem(LS_THRESHOLD, thr.toString());
 
   updateApiStatus();
