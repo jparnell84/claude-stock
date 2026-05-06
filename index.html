@@ -1307,21 +1307,35 @@ Current Data for ${ticker}:
     }
   } catch { stockContext = `Ticker: ${ticker} (live data unavailable)`; }
 
-  const prompt = `You are a sell-side equity analyst with 15 years of experience. Generate a concise yet data-rich trade thesis for ${ticker}.
+  const prompt = `You are a senior sell-side equity analyst. Generate a rigorous trade thesis for ${ticker}.
 
 ${stockContext}
 
-Use web search to find the latest news, earnings, and catalysts for ${ticker}.
+Use web search to find the latest earnings, news, and analyst commentary for ${ticker} before writing.
 
-Respond in this EXACT format with two clearly separated sections. Use plain text, no markdown symbols:
+Return ONLY a valid JSON object — no markdown fences, no preamble, no text outside the JSON.
+Schema:
+{
+  "bull_case": [
+    "Full sentence point — specific and data-driven with a number or catalyst",
+    "Full sentence point",
+    "Full sentence point",
+    "Full sentence point"
+  ],
+  "bear_case": [
+    "Full sentence point — specific and data-driven with a risk or metric",
+    "Full sentence point",
+    "Full sentence point",
+    "Full sentence point"
+  ]
+}
 
-BULL_CASE_START
-[Write 4-5 compelling bullish arguments. Focus on: valuation at 52-week low, technical support, upcoming catalysts, competitive moat, margin expansion, or sector tailwinds. Each point should be specific and data-driven.]
-BULL_CASE_END
-
-BEAR_CASE_START
-[Write 4-5 compelling bearish arguments. Focus on: why it's at 52-week lows (structural vs. cyclical), competitive threats, balance sheet concerns, valuation risks, macro headwinds, or technical breakdown signals.]
-BEAR_CASE_END`;
+Rules:
+- Each array item is one or two complete sentences. No bullet symbols. No ALL-CAPS section headers.
+- bull_case: valuation at 52-week low, upcoming catalysts, competitive moat, margin story, insider activity.
+- bear_case: structural vs cyclical reason for decline, balance sheet risk, competitive threats, macro headwinds.
+- Exactly 4 items per array.
+- Output nothing except the JSON object.`;
 
   try {
     const result = await callClaude(prompt, true);
@@ -1342,23 +1356,51 @@ BEAR_CASE_END`;
 function renderThesis(ticker, rawText) {
   const output = document.getElementById('thesisOutput');
 
-  // Extract bull and bear sections
-  const bullMatch = rawText.match(/BULL_CASE_START([\s\S]*?)BULL_CASE_END/i);
-  const bearMatch = rawText.match(/BEAR_CASE_START([\s\S]*?)BEAR_CASE_END/i);
+  // ── Parse JSON response ───────────────────────────────────────────────────
+  let bullPoints = [];
+  let bearPoints = [];
 
-  const bullText = bullMatch ? bullMatch[1].trim() : rawText.split('\n\n').slice(0, 3).join('\n\n');
-  const bearText = bearMatch ? bearMatch[1].trim() : rawText.split('\n\n').slice(3).join('\n\n');
+  try {
+    // Strip markdown code fences if the model wrapped the JSON anyway
+    const clean = rawText
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```\s*$/,        '')
+      .trim();
 
-  function formatThesisText(text) {
-    return text
-      .split('\n')
-      .filter(l => l.trim())
-      .map(line => {
-        const clean = line.replace(/^[-•▸*\d.]+\s*/, '').trim();
-        return clean ? `<li>${clean}</li>` : '';
-      })
-      .join('');
+    const parsed = JSON.parse(clean);
+
+    bullPoints = Array.isArray(parsed.bull_case) ? parsed.bull_case : [];
+    bearPoints = Array.isArray(parsed.bear_case) ? parsed.bear_case : [];
+
+    // Sanity: if either array is empty the parse "succeeded" on garbage — fall through
+    if (!bullPoints.length || !bearPoints.length) throw new Error('Empty arrays');
+
+  } catch {
+    // ── Fallback: split on common heading patterns if JSON fails ─────────────
+    // Look for any line that screams "BULL" or "BEAR" as a section divider
+    const bullIdx = rawText.search(/bull\s*case/i);
+    const bearIdx = rawText.search(/bear\s*case/i);
+
+    const extractPoints = (text) =>
+      text
+        .split('\n')
+        .map(l => l.replace(/^[-•▸*\d.)]+\s*/, '').trim())
+        .filter(l => l.length > 20);   // skip header-length lines
+
+    if (bullIdx !== -1 && bearIdx !== -1 && bearIdx > bullIdx) {
+      bullPoints = extractPoints(rawText.slice(bullIdx, bearIdx));
+      bearPoints = extractPoints(rawText.slice(bearIdx));
+    } else {
+      // Last resort: split in half
+      const lines = rawText.split('\n').filter(l => l.trim().length > 20);
+      const mid   = Math.floor(lines.length / 2);
+      bullPoints  = lines.slice(0, mid);
+      bearPoints  = lines.slice(mid);
+    }
   }
+
+  const toItems = (pts) =>
+    pts.map(p => `<li>${p}</li>`).join('');
 
   output.classList.remove('hidden');
   output.innerHTML = `
@@ -1368,9 +1410,7 @@ function renderThesis(ticker, rawText) {
         <div class="thesis-panel-label">Bull Case</div>
         <span class="thesis-ticker-badge">${ticker}</span>
       </div>
-      <div class="thesis-content">
-        <ul>${formatThesisText(bullText)}</ul>
-      </div>
+      <div class="thesis-content"><ul>${toItems(bullPoints)}</ul></div>
     </div>
     <div class="thesis-panel thesis-bear">
       <div class="thesis-panel-head">
@@ -1378,9 +1418,7 @@ function renderThesis(ticker, rawText) {
         <div class="thesis-panel-label">Bear Case</div>
         <span class="thesis-ticker-badge">${ticker}</span>
       </div>
-      <div class="thesis-content">
-        <ul>${formatThesisText(bearText)}</ul>
-      </div>
+      <div class="thesis-content"><ul>${toItems(bearPoints)}</ul></div>
     </div>`;
 }
 
